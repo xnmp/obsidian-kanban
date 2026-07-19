@@ -332,11 +332,18 @@ export function astToUnhydratedBoard(
   };
 }
 
+// Parse a single list-item markdown fragment into (pre-hydration) ItemData.
+// This is the expensive step (micromark parse + AST walk); hydration is cheap
+// and done separately so it can run per-item on cache hits.
+function parseItemData(stateManager: StateManager, md: string): ItemData {
+  const ast = parseFragment(stateManager, md);
+  return listItemToItemData(stateManager, md, (ast.children[0] as List).children[0]);
+}
+
 export function updateItemContent(stateManager: StateManager, oldItem: Item, newContent: string) {
   const md = `- [${oldItem.data.checkChar}] ${addBlockId(indentNewLines(newContent), oldItem)}`;
 
-  const ast = parseFragment(stateManager, md);
-  const itemData = listItemToItemData(stateManager, md, (ast.children[0] as List).children[0]);
+  const itemData = parseItemData(stateManager, md);
   const newItem = update(oldItem, {
     data: {
       $set: itemData,
@@ -379,21 +386,97 @@ export function newItem(
   return newItem;
 }
 
+// The compiled settings that actually change the output of parseItemData for an
+// item WITHOUT an external file dependency. Settings not listed here (e.g.
+// tag-colors, hide-card-count, link-date-to-daily-note, metadata-keys) do not
+// alter a link-free item's parsed data, so a change to them yields a full cache
+// hit and skips re-parsing. metadata-keys is deliberately excluded because it
+// only affects items with wikilinks, which are never cached (see below).
+const itemParseSettingKeys: Array<keyof KanbanSettings> = [
+  'move-tags',
+  'move-dates',
+  'move-task-metadata',
+  'inline-metadata-position',
+  'date-trigger',
+  'time-trigger',
+  'date-format',
+  'date-display-format',
+  'date-time-display-format',
+  'time-format',
+  'date-colors',
+];
+
+function itemParseFingerprint(stateManager: StateManager): string {
+  const settings = stateManager.compiledSettings || {};
+  return JSON.stringify(itemParseSettingKeys.map((k) => settings[k] ?? null));
+}
+
+// An item is safe to memoize only when its parse output depends solely on its
+// markdown + the fingerprinted settings — i.e. it has no external file
+// dependency. Items with wikilinks/embeds pull in linked-file metadata (which
+// can change without any board edit, e.g. dataview:api-ready) and are always
+// re-parsed.
+function isCacheableItem(item: Item): boolean {
+  const m = item.data.metadata;
+  return (
+    !m.fileAccessor && !m.file && !m.fileMetadata && !(m.fileMetadataOrder && m.fileMetadataOrder.length)
+  );
+}
+
+// Shallow-clone cached ItemData with a fresh `metadata` object so that
+// hydrateItem's in-place mutation (date/time moments, resolved file,
+// titleSearch) never leaks into the shared cache entry or into sibling items
+// that share the same cache key (e.g. duplicate cards).
+function cloneItemData(data: ItemData): ItemData {
+  return {
+    ...data,
+    metadata: { ...data.metadata },
+  };
+}
+
 export function reparseBoard(stateManager: StateManager, board: Board) {
   try {
-    return update(board, {
+    const fingerprint = itemParseFingerprint(stateManager);
+    const oldCache = stateManager.itemParseCache;
+    // Rebuilt each reparse: entries for items no longer on the board fall away.
+    const newCache = new Map<string, ItemData>();
+
+    const reparsedBoard = update(board, {
       children: {
         $set: board.children.map((lane) => {
           return update(lane, {
             children: {
               $set: lane.children.map((item) => {
-                return updateItemContent(stateManager, item, item.data.titleRaw);
+                if (!isCacheableItem(item)) {
+                  return updateItemContent(stateManager, item, item.data.titleRaw);
+                }
+
+                const md = itemToMd(item);
+                const key = fingerprint + '\0' + md;
+
+                let cached = newCache.get(key) ?? oldCache.get(key);
+                if (!cached) {
+                  cached = parseItemData(stateManager, md);
+                }
+                newCache.set(key, cached);
+
+                const newItem = update(item, { data: { $set: cloneItemData(cached) } });
+                try {
+                  hydrateItem(stateManager, newItem);
+                } catch (e) {
+                  console.error(e);
+                }
+                return newItem;
               }),
             },
           });
         }),
       },
     });
+
+    stateManager.itemParseCache = newCache;
+
+    return reparsedBoard;
   } catch (e) {
     stateManager.setError(e);
     throw e;

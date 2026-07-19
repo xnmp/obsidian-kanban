@@ -5,7 +5,7 @@ import { useEffect, useState } from 'preact/compat';
 import { KanbanView } from './KanbanView';
 import { KanbanSettings, SettingRetrievers } from './Settings';
 import { getDefaultDateFormat, getDefaultTimeFormat } from './components/helpers';
-import { Board, BoardTemplate, Item } from './components/types';
+import { Board, BoardTemplate, Item, ItemData } from './components/types';
 import { ListFormat } from './parsers/List';
 import { BaseFormat, frontmatterKey, shouldRefreshBoard } from './parsers/common';
 import { getTaskStatusDone } from './parsers/helpers/inlineMetadata';
@@ -35,6 +35,15 @@ export class StateManager {
   // changing a file with a matching basename may newly resolve them.
   fileDependencies: Set<string> = new Set();
   unresolvedLinkBasenames: Set<string> = new Set();
+
+  // Per-board memoization of expensive per-item parsing (parseFragment +
+  // listItemToItemData), keyed by the item's markdown input + a fingerprint of
+  // the settings that affect item parsing. Rebuilt from scratch on every
+  // reparseBoard (see formats/list.ts), which bounds it to the items currently
+  // on the board. Only holds PRE-hydration ItemData for items with no external
+  // file dependency; hydration (which builds fresh moment objects) is re-run per
+  // item on every hit, so cache entries are never aliased with live board items.
+  itemParseCache: Map<string, ItemData> = new Map();
 
   constructor(
     app: App,
