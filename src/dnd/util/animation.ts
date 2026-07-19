@@ -55,9 +55,9 @@ export const combine = {
 };
 
 export const timings = {
-  outOfTheWay: 200,
-  minDropTime: 330,
-  maxDropTime: 550,
+  outOfTheWay: 150,
+  minDropTime: 120,
+  maxDropTime: 220,
 };
 
 const outOfTheWayTiming: string = `${timings.outOfTheWay}ms ${curves.outOfTheWay}`;
