@@ -27,6 +27,15 @@ export class StateManager {
 
   parser: BaseFormat;
 
+  // Index of vault files this board's cards depend on. Rebuilt on every parse.
+  // `fileDependencies` holds resolved link/embed target paths; a change to any
+  // of these files can alter a card's rendered metadata, so the board must
+  // reparse. `unresolvedLinkBasenames` holds the (lowercased, extension-less)
+  // basenames of links that don't currently resolve to a file — creating or
+  // changing a file with a matching basename may newly resolve them.
+  fileDependencies: Set<string> = new Set();
+  unresolvedLinkBasenames: Set<string> = new Set();
+
   constructor(
     app: App,
     initialView: KanbanView,
@@ -122,6 +131,7 @@ export class StateManager {
       try {
         this.compileSettings();
         this.state = this.parser.reparseBoard();
+        this.rebuildFileIndex();
 
         this.stateReceivers.forEach((receiver) => receiver(this.state));
         this.settingsNotifiers.forEach((notifiers) => {
@@ -155,6 +165,8 @@ export class StateManager {
         this.state = newState;
         this.compileSettings();
       }
+
+      this.rebuildFileIndex();
 
       this.viewSet.forEach((view) => {
         view.initHeaderButtons();
@@ -349,8 +361,64 @@ export class StateManager {
     );
   }
 
-  onFileMetadataChange() {
-    this.reparseBoardFromMd();
+  // Normalize a link target or file path to a lowercase, extension-less basename
+  // so unresolved links can be matched against changed/created files by name.
+  private linkBasename(target: string): string {
+    const withoutPath = target.slice(target.lastIndexOf('/') + 1);
+    const withoutExt = withoutPath.replace(/\.md$/i, '');
+    return withoutExt.toLocaleLowerCase();
+  }
+
+  // Walk the board's visible cards and record which vault files they depend on.
+  // Archived cards are intentionally excluded: they aren't rendered, so a change
+  // to a file only an archived card links to has no visible effect.
+  rebuildFileIndex() {
+    const fileDependencies = new Set<string>();
+    const unresolvedLinkBasenames = new Set<string>();
+
+    if (this.state?.children) {
+      for (const lane of this.state.children) {
+        for (const item of lane.children) {
+          const { file, fileAccessor } = item.data.metadata;
+          if (file) {
+            fileDependencies.add(file.path);
+          } else if (fileAccessor?.target) {
+            // Broken/unresolved link — track its basename so a later create or
+            // change that resolves it triggers a reparse.
+            unresolvedLinkBasenames.add(this.linkBasename(fileAccessor.target));
+          }
+        }
+      }
+    }
+
+    this.fileDependencies = fileDependencies;
+    this.unresolvedLinkBasenames = unresolvedLinkBasenames;
+  }
+
+  // Whether a change to `file` could affect this board's rendered cards.
+  private dependsOnFile(file: TFile): boolean {
+    if (this.fileDependencies.has(file.path)) return true;
+    if (this.unresolvedLinkBasenames.has(this.linkBasename(file.basename))) return true;
+    return false;
+  }
+
+  onFileMetadataChange(file: TFile) {
+    if (this.dependsOnFile(file)) {
+      this.reparseBoardFromMd();
+    }
+  }
+
+  onFileRename(file: TFile, oldPath: string) {
+    // A dependency file was moved/renamed: reparse if the board referenced it by
+    // its old path, or if either the old or new basename matches an unresolved
+    // link (a rename can break a working link or resolve a broken one).
+    if (
+      this.fileDependencies.has(oldPath) ||
+      this.unresolvedLinkBasenames.has(this.linkBasename(oldPath)) ||
+      this.unresolvedLinkBasenames.has(this.linkBasename(file.basename))
+    ) {
+      this.reparseBoardFromMd();
+    }
   }
 
   async reparseBoardFromMd() {

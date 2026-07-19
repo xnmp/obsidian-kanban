@@ -523,6 +523,14 @@ export default class KanbanPlugin extends Plugin {
         kanbanLeaves.forEach((leaf) => {
           (leaf.view as KanbanView).handleRename(file.path, oldPath);
         });
+
+        if (file instanceof TFile) {
+          this.stateManagers.forEach((manager) => {
+            if (manager.file !== file) {
+              manager.onFileRename(file, oldPath);
+            }
+          });
+        }
       })
     );
 
@@ -530,7 +538,7 @@ export default class KanbanPlugin extends Plugin {
       (file: TFile) => {
         this.stateManagers.forEach((manager) => {
           if (manager.file !== file) {
-            manager.onFileMetadataChange();
+            manager.onFileMetadataChange(file);
           }
         });
       },
