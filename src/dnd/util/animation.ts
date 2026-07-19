@@ -55,9 +55,11 @@ export const combine = {
 };
 
 export const timings = {
-  outOfTheWay: 150,
-  minDropTime: 120,
-  maxDropTime: 220,
+  outOfTheWay: 100,
+  // 0 = commit the drop at drag-end with no settle animation; the card
+  // lands instantly. Raise to ~80-150 to restore a brief drop animation.
+  minDropTime: 0,
+  maxDropTime: 0,
 };
 
 const outOfTheWayTiming: string = `${timings.outOfTheWay}ms ${curves.outOfTheWay}`;
