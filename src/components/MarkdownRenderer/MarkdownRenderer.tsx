@@ -294,13 +294,44 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
     if (shouldRender || intersectionContext || !elRef.current) return;
 
     const el = elRef.current;
-    view.observeLazyRender(el, () => setShouldRender(true));
+    const dragManager = dndManager?.dragManager;
+    const dragEmitter = dragManager?.emitter;
+    let onDragEnd: (() => void) | null = null;
 
-    return () => view.unobserveLazyRender(el);
-  }, [shouldRender, intersectionContext, view]);
+    view.observeLazyRender(el, () => {
+      // A card that first intersects mid-drag must not render now: growing the
+      // 1.5em placeholder to full height under the cursor shifts DnD hitboxes
+      // between debounced recalcs. Queue it and flush once the drag ends.
+      if (dragManager?.dragEntityId && dragEmitter) {
+        onDragEnd = () => {
+          dragEmitter.off('dragEnd', onDragEnd);
+          onDragEnd = null;
+          // Flush on the next microtask so the drop settles first.
+          Promise.resolve().then(() => setShouldRender(true));
+        };
+        dragEmitter.on('dragEnd', onDragEnd);
+      } else {
+        setShouldRender(true);
+      }
+    });
+
+    return () => {
+      view.unobserveLazyRender(el);
+      if (onDragEnd && dragEmitter) dragEmitter.off('dragEnd', onDragEnd);
+    };
+  }, [shouldRender, intersectionContext, view, dndManager]);
 
   useEffect(() => {
     if (!shouldRender) return;
+
+    // Apply the current search highlight to a freshly-created/migrated renderer.
+    // The [searchQuery] effect below only fires when the query changes, so a card
+    // that lazily renders while a search is already active would otherwise never
+    // get marked. When no search is active this is a no-op.
+    const applySearchHighlight = (preview: BasicMarkdownRenderer) => {
+      if (renderer.current !== preview) return;
+      if (searchQuery && searchQuery.trim()) preview.mark.mark(searchQuery);
+    };
 
     const onVisibilityChange = (isVisible: boolean) => {
       const preview = renderer.current;
@@ -322,6 +353,8 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
 
       renderer.current = preview;
       preview.migrate(elRef.current);
+      // migrate() unmarks; re-apply the active query since the content is ready.
+      applySearchHighlight(preview);
 
       entityManager?.emitter.on('visibility-change', onVisibilityChange);
       return () => entityManager?.emitter.off('visibility-change', onVisibilityChange);
@@ -337,6 +370,8 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
     elRef.current.append(preview.containerEl);
     colorizeTags(elRef.current, getTagColor);
     colorizeDates(elRef.current, getDateColor);
+    // Content renders asynchronously; mark once Obsidian's render resolves.
+    preview.renderCapability.promise.then(() => applySearchHighlight(preview));
 
     entityManager?.emitter.on('visibility-change', onVisibilityChange);
 

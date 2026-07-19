@@ -80,7 +80,7 @@ export class StateManager {
     if (shouldParseData) {
       await this.newBoard(view, data);
     } else {
-      await view.prerender(this.state);
+      await view.prerender();
     }
 
     view.populateViewState(this.state.data.settings);
@@ -107,7 +107,7 @@ export class StateManager {
   async newBoard(view: KanbanView, md: string) {
     try {
       const board = this.getParsedBoard(md);
-      await view.prerender(board);
+      await view.prerender();
       this.setState(board, false);
     } catch (e) {
       this.setError(e);

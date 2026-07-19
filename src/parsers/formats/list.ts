@@ -426,11 +426,17 @@ function isCacheableItem(item: Item): boolean {
 // Shallow-clone cached ItemData with a fresh `metadata` object so that
 // hydrateItem's in-place mutation (date/time moments, resolved file,
 // titleSearch) never leaks into the shared cache entry or into sibling items
-// that share the same cache key (e.g. duplicate cards).
+// that share the same cache key (e.g. duplicate cards). The `tags` and
+// `inlineMetadata` arrays get fresh copies too so cache entries never share a
+// mutable array with a live item (their elements — tag strings and immutable
+// InlineField records — are never mutated, so shallow element copies are safe).
 function cloneItemData(data: ItemData): ItemData {
+  const metadata = { ...data.metadata };
+  if (metadata.tags) metadata.tags = [...metadata.tags];
+  if (metadata.inlineMetadata) metadata.inlineMetadata = [...metadata.inlineMetadata];
   return {
     ...data,
-    metadata: { ...data.metadata },
+    metadata,
   };
 }
 

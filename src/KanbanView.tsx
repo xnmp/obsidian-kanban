@@ -88,8 +88,7 @@ export class KanbanView extends TextFileView implements HoverParent {
   // triggers its own Obsidian render the first time it approaches the viewport
   // (see observeLazyRender + MarkdownRenderer.tsx). prerender now only ensures
   // header buttons are present so the board can paint immediately.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async prerender(board: Board) {
+  async prerender() {
     this.initHeaderButtons();
   }
 
