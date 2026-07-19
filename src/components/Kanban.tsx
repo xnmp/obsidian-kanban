@@ -62,8 +62,6 @@ export const Kanban = ({ view, stateManager }: KanbanProps) => {
 
   const filePath = stateManager.file.path;
   const maxArchiveLength = stateManager.useSetting('max-archive-size');
-  const dateColors = stateManager.useSetting('date-colors');
-  const tagColors = stateManager.useSetting('tag-colors');
   const boardView = view.useViewState(frontmatterKey);
 
   const closeLaneForm = useCallback(() => {
@@ -174,7 +172,7 @@ export const Kanban = ({ view, stateManager }: KanbanProps) => {
       boardModifiers,
       filePath,
     };
-  }, [view, stateManager, boardModifiers, filePath, dateColors, tagColors]);
+  }, [view, stateManager, boardModifiers, filePath]);
 
   const html5DragHandlers = createHTMLDndHandlers(stateManager);
 
