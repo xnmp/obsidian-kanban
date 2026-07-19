@@ -5,7 +5,7 @@ import { StateManager } from 'src/StateManager';
 import { handleDragOrPaste } from 'src/components/Item/helpers';
 
 import { DndManagerContext } from '../components/context';
-import { Coordinates, Entity, Hitbox, Side } from '../types';
+import { Coordinates, Entity, Hitbox, ScopedEntityData, Side } from '../types';
 import { rafThrottle } from '../util/animation';
 import { createHTMLDndEntity } from '../util/createHTMLDndEntity';
 import {
@@ -52,6 +52,14 @@ export class DragManager {
   isHTMLDragging: boolean = false;
   dragOverTimeout: number = 0;
 
+  // Per-drag caches. getData() spreads an object and calls getParentWindow, so
+  // caching it per entity avoids that allocation on every rAF frame. The
+  // accepts-filtered entity lists are rebuilt only when the registry changes
+  // (entities register/unregister mid-drag as cards scroll in and out).
+  dragDataCache: Map<Entity, ScopedEntityData> = new Map();
+  filteredHitboxEntities: Entity[] | null = null;
+  filteredScrollEntities: Entity[] | null = null;
+
   constructor(
     win: Window,
     emitter: EventEmitter,
@@ -62,6 +70,28 @@ export class DragManager {
     this.hitboxEntities = hitboxEntities;
     this.scrollEntities = scrollEntities;
     this.emitter = emitter;
+  }
+
+  getEntityData = (entity: Entity): ScopedEntityData => {
+    let data = this.dragDataCache.get(entity);
+    if (data === undefined) {
+      data = entity.getData();
+      this.dragDataCache.set(entity, data);
+    }
+    return data;
+  };
+
+  // Called when the entity registry changes so the accepts-filtered lists are
+  // rebuilt on the next frame; newly registered entities then participate.
+  invalidateEntities() {
+    this.filteredHitboxEntities = null;
+    this.filteredScrollEntities = null;
+  }
+
+  resetDragCaches() {
+    this.dragDataCache.clear();
+    this.filteredHitboxEntities = null;
+    this.filteredScrollEntities = null;
   }
 
   getDragEventData() {
@@ -83,6 +113,8 @@ export class DragManager {
 
     if (!id) return;
 
+    this.resetDragCaches();
+
     const styles = getComputedStyle(referenceElement || (e.currentTarget as HTMLElement));
 
     this.dragEntityId = id;
@@ -102,6 +134,7 @@ export class DragManager {
 
   dragStartHTML(e: DragEvent, viewId: string) {
     this.isHTMLDragging = true;
+    this.resetDragCaches();
     const entity = createHTMLDndEntity(e.pageX, e.pageY, [], viewId, e.view);
 
     this.dragEntityId = entity.entityId;
@@ -137,6 +170,7 @@ export class DragManager {
     this.dragPosition = undefined;
     this.scrollIntersection = undefined;
     this.primaryIntersection = undefined;
+    this.resetDragCaches();
   }
 
   dragEndHTML(e: DragEvent, viewId: string, content: string[], isLeave?: boolean) {
@@ -154,6 +188,7 @@ export class DragManager {
     this.dragPosition = undefined;
     this.scrollIntersection = undefined;
     this.primaryIntersection = undefined;
+    this.resetDragCaches();
 
     if (isLeave) {
       this.emitter.emit('dragEnd', this.getDragEventData());
@@ -170,34 +205,44 @@ export class DragManager {
       return;
     }
 
-    const { type, win } = this.dragEntity.getData();
+    const { type, win } = this.getEntityData(this.dragEntity);
 
-    const hitboxEntities: Entity[] = [];
-    const hitboxHitboxes: Hitbox[] = [];
-    const scrollEntities: Entity[] = [];
-    const scrollHitboxes: Hitbox[] = [];
+    // Rebuild the accepts-filtered lists only when the registry changed
+    // (invalidateEntities nulls them); otherwise reuse across frames.
+    if (this.filteredHitboxEntities === null) {
+      const entities: Entity[] = [];
+      this.hitboxEntities.forEach((entity) => {
+        const data = this.getEntityData(entity);
 
-    this.hitboxEntities.forEach((entity) => {
-      const data = entity.getData();
+        if (win === data.win && (data.accepts.includes(type) || data.acceptsSort?.includes(type))) {
+          entities.push(entity);
+        }
+      });
+      this.filteredHitboxEntities = entities;
+    }
 
-      if (win === data.win && (data.accepts.includes(type) || data.acceptsSort?.includes(type))) {
-        hitboxEntities.push(entity);
-        hitboxHitboxes.push(entity.getHitbox());
-      }
-    });
+    if (this.filteredScrollEntities === null) {
+      const entities: Entity[] = [];
+      this.scrollEntities.forEach((entity) => {
+        const data = this.getEntityData(entity);
 
-    this.scrollEntities.forEach((entity) => {
-      const data = entity.getData();
+        if (win === data.win && data.accepts.includes(type)) {
+          entities.push(entity);
+        }
+      });
+      this.filteredScrollEntities = entities;
+    }
 
-      if (win === data.win && data.accepts.includes(type)) {
-        scrollEntities.push(entity);
-        scrollHitboxes.push(entity.getHitbox());
-      }
-    });
+    const hitboxEntities = this.filteredHitboxEntities;
+    const scrollEntities = this.filteredScrollEntities;
 
     if (hitboxEntities.length === 0 && scrollEntities.length === 0) {
       return;
     }
+
+    // Hitbox geometry can shift every frame (scroll), so recompute per frame.
+    const hitboxHitboxes = hitboxEntities.map((entity) => entity.getHitbox());
+    const scrollHitboxes = scrollEntities.map((entity) => entity.getHitbox());
 
     const dragHitbox = adjustHitboxForMovement(
       this.dragOriginHitbox,
@@ -227,14 +272,19 @@ export class DragManager {
       (match) => hitboxEntities[match[1]]
     );
 
-    const scrollIntersection = getScrollIntersection(scrollHits, dragHitbox, dragEntity);
+    const scrollIntersection = getScrollIntersection(
+      scrollHits,
+      dragHitbox,
+      dragEntity,
+      this.getEntityData
+    );
 
     if (
       this.scrollIntersection &&
       (!scrollIntersection || scrollIntersection[0] !== this.scrollIntersection[0])
     ) {
       const [scrollEntity, scrollStrength] = this.scrollIntersection;
-      const scrollEntityData = scrollEntity.getData();
+      const scrollEntityData = this.getEntityData(scrollEntity);
       const scrollEntityId = scrollEntity.entityId;
       const scrollEntitySide = scrollEntityData.side;
 
@@ -258,7 +308,7 @@ export class DragManager {
       (!this.scrollIntersection || this.scrollIntersection[0] !== scrollIntersection[0])
     ) {
       const [scrollEntity, scrollStrength] = scrollIntersection;
-      const scrollEntityData = scrollEntity.getData();
+      const scrollEntityData = this.getEntityData(scrollEntity);
       const scrollEntityId = scrollEntity.entityId;
       const scrollEntitySide = scrollEntityData.side;
 
@@ -281,7 +331,7 @@ export class DragManager {
       scrollIntersection[0] === this.scrollIntersection[0]
     ) {
       const [scrollEntity, scrollStrength] = scrollIntersection;
-      const scrollEntityData = scrollEntity.getData();
+      const scrollEntityData = this.getEntityData(scrollEntity);
       const scrollEntityId = scrollEntity.entityId;
       const scrollEntitySide = scrollEntityData.side;
 
@@ -313,7 +363,7 @@ export class DragManager {
       (match) => hitboxEntities[match[1]]
     );
 
-    const primaryIntersection = getBestIntersect(hits, dragHitbox, dragEntity);
+    const primaryIntersection = getBestIntersect(hits, dragHitbox, dragEntity, this.getEntityData);
 
     if (this.primaryIntersection && this.primaryIntersection !== primaryIntersection) {
       this.emitter.emit('dragLeave', this.getDragEventData(), this.primaryIntersection.entityId);

@@ -1,4 +1,16 @@
-import { CoordinateShift, Coordinates, Entity, Hitbox, ScrollState, Side } from '../types';
+import {
+  CoordinateShift,
+  Coordinates,
+  Entity,
+  Hitbox,
+  ScopedEntityData,
+  ScrollState,
+  Side,
+} from '../types';
+
+export type GetEntityData = (entity: Entity) => ScopedEntityData;
+
+const defaultGetData: GetEntityData = (entity) => entity.getData();
 
 export const emptyDomRect: DOMRectReadOnly = {
   bottom: 0,
@@ -163,13 +175,14 @@ export function rectIntersection(entities: Entity[], target: Hitbox) {
 export function getScrollIntersection(
   entities: Entity[],
   target: Hitbox,
-  dragEntity: Entity
+  dragEntity: Entity,
+  getData: GetEntityData = defaultGetData
 ): [Entity, number] {
-  const primary = getBestIntersect(entities, target, dragEntity);
+  const primary = getBestIntersect(entities, target, dragEntity, getData);
 
   if (!primary) return null;
 
-  const side = primary.getData().side as Side;
+  const side = getData(primary).side as Side;
   const hitbox = primary.getHitbox();
 
   let targetIndex = 0;
@@ -269,22 +282,24 @@ export function closestCenter(entities: Entity[], target: Hitbox) {
 export function getBestIntersect(
   hits: Entity[],
   dragHitbox: Hitbox,
-  dragEntity: Entity
+  dragEntity: Entity,
+  getData: GetEntityData = defaultGetData
 ): Entity | null {
   const dragTopLeft = cornersOfRectangle(dragHitbox)[0];
   const dragCenter = centerOfRectangle(dragHitbox);
   const dragId = dragEntity.entityId;
+  const dragType = getData(dragEntity).type;
   const distances = hits.map((entity) => {
     if (entity.entityId === dragId) {
       return Infinity;
     }
 
-    const data = entity.getData();
+    const data = getData(entity);
     const isDropArea = data.acceptsSort;
     const entityHitbox = entity.getHitbox();
     const entityCenter = centerOfRectangle(entityHitbox);
 
-    if (isDropArea && !isDropArea.contains(dragEntity.getData().type)) {
+    if (isDropArea && !isDropArea.contains(dragType)) {
       return distanceBetween(dragCenter, entityCenter);
     }
 
