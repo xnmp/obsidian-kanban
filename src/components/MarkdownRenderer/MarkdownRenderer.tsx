@@ -36,6 +36,21 @@ function colorizeTags(wrapperEl: HTMLElement, getTagColor: (tag: string) => TagC
   });
 }
 
+// Parsing a date string with moment() is deterministic, so cache the parsed
+// moment keyed by the raw string to avoid re-parsing the same DOM data
+// attributes on every render. getDateColor only reads the moment, never
+// mutates it, so sharing the instance across calls is safe.
+const parsedDateCache = new Map<string, moment.Moment>();
+
+function getParsedDate(dateStr: string): moment.Moment {
+  let parsed = parsedDateCache.get(dateStr);
+  if (!parsed) {
+    parsed = moment(dateStr);
+    parsedDateCache.set(dateStr, parsed);
+  }
+  return parsed;
+}
+
 function colorizeDates(wrapperEl: HTMLElement, getDateColor: (date: moment.Moment) => DateColor) {
   if (!wrapperEl) return;
   const dateEls = wrapperEl.querySelectorAll<HTMLElement>('.' + c('date'));
@@ -43,7 +58,7 @@ function colorizeDates(wrapperEl: HTMLElement, getDateColor: (date: moment.Momen
   dateEls.forEach((el) => {
     const dateStr = el.dataset.date;
     if (!dateStr) return;
-    const parsed = moment(dateStr);
+    const parsed = getParsedDate(dateStr);
     if (!parsed.isValid()) return;
     const color = getDateColor(parsed);
     el.toggleClass('has-background', !!color?.backgroundColor);
