@@ -37,6 +37,14 @@ export class KanbanView extends TextFileView implements HoverParent {
   previewCache: Map<string, BasicMarkdownRenderer>;
   previewQueue: PromiseQueue;
 
+  // Lazy card rendering: cards are only handed to Obsidian's MarkdownRenderer
+  // once they approach the viewport. One IntersectionObserver per window (to
+  // stay correct across pop-out windows), keyed by the element's owner window.
+  // A generous rootMargin renders roughly a viewport-height ahead so scrolling
+  // never reveals a blank placeholder.
+  lazyRenderObservers: Map<Window, IntersectionObserver> = new Map();
+  lazyRenderCallbacks: WeakMap<Element, () => void> = new WeakMap();
+
   activeEditor: any;
   viewSettings: KanbanViewSettings = {};
 
@@ -76,26 +84,53 @@ export class KanbanView extends TextFileView implements HoverParent {
     bindMarkdownEvents(this);
   }
 
+  // Cards are no longer eagerly rendered here; each card's MarkdownRenderer
+  // triggers its own Obsidian render the first time it approaches the viewport
+  // (see observeLazyRender + MarkdownRenderer.tsx). prerender now only ensures
+  // header buttons are present so the board can paint immediately.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async prerender(board: Board) {
-    board.children.forEach((lane) => {
-      lane.children.forEach((item) => {
-        if (this.previewCache.has(item.id)) return;
-
-        this.previewQueue.add(async () => {
-          const preview = this.addChild(new BasicMarkdownRenderer(this, item.data.title));
-          this.previewCache.set(item.id, preview);
-          await preview.renderCapability.promise;
-        });
-      });
-    });
-
-    if (this.previewQueue.isRunning) {
-      await new Promise((res) => {
-        this.emitter.once('queueEmpty', res);
-      });
-    }
-
     this.initHeaderButtons();
+  }
+
+  private getLazyRenderObserver(win: Window): IntersectionObserver {
+    let observer = this.lazyRenderObservers.get(win);
+    if (!observer) {
+      observer = new (win as any).IntersectionObserver(
+        (entries: IntersectionObserverEntry[]) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const cb = this.lazyRenderCallbacks.get(entry.target);
+            if (cb) {
+              this.lazyRenderCallbacks.delete(entry.target);
+              observer.unobserve(entry.target);
+              cb();
+            }
+          }
+        },
+        // root: null -> the window's viewport. Render ~1 viewport ahead
+        // vertically and half a viewport ahead horizontally.
+        { root: null, rootMargin: '100% 50%' }
+      );
+      this.lazyRenderObservers.set(win, observer);
+    }
+    return observer;
+  }
+
+  // Invoke `cb` once, the first time `el` approaches the viewport.
+  observeLazyRender(el: HTMLElement, cb: () => void) {
+    this.lazyRenderCallbacks.set(el, cb);
+    this.getLazyRenderObserver(getParentWindow(el) as Window).observe(el);
+  }
+
+  unobserveLazyRender(el: HTMLElement) {
+    this.lazyRenderCallbacks.delete(el);
+    this.lazyRenderObservers.forEach((observer) => observer.unobserve(el));
+  }
+
+  private destroyLazyRenderObservers() {
+    this.lazyRenderObservers.forEach((observer) => observer.disconnect());
+    this.lazyRenderObservers.clear();
   }
 
   validatePreviewCache(board: Board) {
@@ -186,6 +221,7 @@ export class KanbanView extends TextFileView implements HoverParent {
 
     this.previewQueue.clear();
     this.previewCache.clear();
+    this.destroyLazyRenderObservers();
     this.emitter.emit('queueEmpty');
 
     // Remove draggables from render, as the DOM has already detached
@@ -231,6 +267,7 @@ export class KanbanView extends TextFileView implements HoverParent {
       this.activeEditor = null;
       this.previewQueue.clear();
       this.previewCache.clear();
+      this.destroyLazyRenderObservers();
       this.emitter.emit('queueEmpty');
       Object.values(this.actionButtons).forEach((b) => b.remove());
       this.actionButtons = {};

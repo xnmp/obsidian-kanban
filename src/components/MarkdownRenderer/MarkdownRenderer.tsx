@@ -3,7 +3,7 @@ import classcat from 'classcat';
 import Mark from 'mark.js';
 import moment from 'moment';
 import { Component, MarkdownRenderer as ObsidianRenderer, getLinkpath } from 'obsidian';
-import { CSSProperties, memo, useEffect, useRef } from 'preact/compat';
+import { CSSProperties, memo, useEffect, useRef, useState } from 'preact/compat';
 import { useContext } from 'preact/hooks';
 import { KanbanView } from 'src/KanbanView';
 import { DndManagerContext, EntityManagerContext } from 'src/dnd/components/context';
@@ -251,6 +251,11 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
   const renderer = useRef<BasicMarkdownRenderer>();
   const elRef = useRef<HTMLDivElement>();
 
+  // Lazy rendering: don't hand this card to Obsidian's MarkdownRenderer until it
+  // approaches the viewport. Cards already in the preview cache (rendered earlier,
+  // e.g. before a re-sort) render immediately.
+  const [shouldRender, setShouldRender] = useState(() => !entityId || view.previewCache.has(entityId));
+
   // Reset virtualization if this entity is a managed entity and has changed sort order
   useEffect(() => {
     if (!entityManager || !entityId || !renderer.current) return;
@@ -262,13 +267,18 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
     observer.observe(entityManager.measureNode);
   }, [sortContext]);
 
-  // If we have an intersection context (eg, in table view) then use that for virtualization
+  // If we have an intersection context (eg, in table view) then use that for both
+  // the first (lazy) render trigger and subsequent show/hide virtualization.
   useEffect(() => {
     if (!intersectionContext || !elRef.current) return;
 
     intersectionContext.registerHandler(elRef.current, (entry) => {
-      if (entry.isIntersecting) renderer.current?.show();
-      else renderer.current?.hide();
+      if (entry.isIntersecting) {
+        if (renderer.current) renderer.current.show();
+        else setShouldRender(true);
+      } else {
+        renderer.current?.hide();
+      }
     });
 
     return () => {
@@ -278,7 +288,20 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
     };
   }, []);
 
+  // Board view (no intersection context): trigger the first render when the card
+  // approaches the viewport via the view's shared lazy-render observer.
   useEffect(() => {
+    if (shouldRender || intersectionContext || !elRef.current) return;
+
+    const el = elRef.current;
+    view.observeLazyRender(el, () => setShouldRender(true));
+
+    return () => view.unobserveLazyRender(el);
+  }, [shouldRender, intersectionContext, view]);
+
+  useEffect(() => {
+    if (!shouldRender) return;
+
     const onVisibilityChange = (isVisible: boolean) => {
       const preview = renderer.current;
       if (!preview || !entityManager?.parent) return;
@@ -321,7 +344,7 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
       renderer.current?.renderCapability.resolve();
       entityManager?.emitter.off('visibility-change', onVisibilityChange);
     };
-  }, [view, entityId, entityManager]);
+  }, [view, entityId, entityManager, shouldRender]);
 
   // Respond to changes to the markdown string
   useEffect(() => {
@@ -360,7 +383,7 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
   }, []);
 
   let styles: CSSProperties | undefined = undefined;
-  if (!renderer.current && view.previewCache.has(entityId)) {
+  if (!renderer.current && entityId && view.previewCache.has(entityId)) {
     const preview = view.previewCache.get(entityId);
     if (preview.lastRefHeight > 0) {
       styles = {
@@ -368,6 +391,12 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
         height: `${preview.lastRefHeight}px`,
       };
     }
+  } else if (!shouldRender) {
+    // Not-yet-rendered card: reserve approximately one line so the board can lay
+    // out immediately. When the real content renders, the resulting resize is
+    // picked up by the shared ResizeObserver (measureNode), which recalcs the
+    // DnD hitboxes, keeping drag targets correct.
+    styles = { minHeight: '1.5em' };
   }
 
   return (
@@ -383,6 +412,7 @@ export const MarkdownRenderer = memo(function MarkdownPreviewRenderer({
 export const MarkdownClonedPreviewRenderer = memo(function MarkdownClonedPreviewRenderer({
   entityId,
   className,
+  markdownString,
   ...divProps
 }: MarkdownRendererProps) {
   const { view } = useContext(KanbanContext);
@@ -402,8 +432,14 @@ export const MarkdownClonedPreviewRenderer = memo(function MarkdownClonedPreview
       style={styles}
       ref={(el) => {
         elRef.current = el;
-        if (el && preview && el.childElementCount === 0) {
-          el.append(preview.containerEl.cloneNode(true));
+        if (el && el.childElementCount === 0) {
+          if (preview) {
+            el.append(preview.containerEl.cloneNode(true));
+          } else if (markdownString) {
+            // Card hasn't been rendered yet (dragged before its lazy render
+            // completed): fall back to plain text so the drag ghost isn't blank.
+            el.setText(markdownString);
+          }
         }
       }}
       className={classcat([c('markdown-preview-wrapper'), className])}
